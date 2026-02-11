@@ -1,16 +1,17 @@
 /* =========================================================
    HP TAKEOUT DETECTOR
-   FINAL FIX (FOLDER + NAME DETECTION)
+   FINAL VERSION (FOLDER-AWARE + SHOW LIST)
    ========================================================= */
 
 const $ = (id) => document.getElementById(id);
 let lastTakeoutRows = [];
 
+/* ===================== STATUS ===================== */
 function setStatus(msg) {
   $("status").textContent = msg;
 }
 
-/* ===================== READ KMZ / KML ===================== */
+/* ===================== READ KMZ ===================== */
 async function readKmzOrKml(file) {
   const lower = file.name.toLowerCase();
 
@@ -42,27 +43,12 @@ function getFolderPath(node) {
   return parts.join("/");
 }
 
-/* ===================== DISTANCE ===================== */
-function distM(lat1, lon1, lat2, lon2) {
-  const R = 6371000;
-  const toRad = x => x * Math.PI / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-
-  const a =
-    Math.sin(dLat/2)**2 +
-    Math.cos(toRad(lat1)) *
-    Math.cos(toRad(lat2)) *
-    Math.sin(dLon/2)**2;
-
-  return 2 * R * Math.asin(Math.sqrt(a));
-}
-
-/* ===================== PARSE PLACEMARK ===================== */
-function parsePointsFromKML(kmlText) {
+/* ===================== PARSE HP FROM KML (FOLDER-AWARE) ===================== */
+function parseHPFromKML(kmlText) {
   const dom = new DOMParser().parseFromString(kmlText, "text/xml");
   const placemarks = [...dom.getElementsByTagName("Placemark")];
-  const points = [];
+
+  const results = [];
 
   for (const pm of placemarks) {
     const point = pm.getElementsByTagName("Point")[0];
@@ -76,101 +62,52 @@ function parsePointsFromKML(kmlText) {
 
     const name = pm.getElementsByTagName("name")[0]?.textContent?.trim() || "";
     const folderPath = getFolderPath(pm);
+    const upperPath = folderPath.toUpperCase();
 
-    points.push({
-      name: name || "(NO_NAME)",
+    // HP ditentukan dari folder: HP / HOME / HOME-BIZ
+    const isHP =
+      upperPath.includes("/HP") || upperPath.endsWith("HP") ||
+      upperPath.includes("/HOME") ||
+      upperPath.includes("/HOME-BIZ");
+
+    if (!isHP) continue;
+
+    results.push({
+      hpId: name || "(NO_NAME)",
       lat,
       lon,
       path: folderPath
     });
   }
 
-  return points;
+  return results;
 }
 
-/* ===================== DETECT HP ===================== */
-function isHPPoint(pt) {
-  const p = (pt.path || "").toUpperCase();
-  const n = (pt.name || "").toUpperCase();
-
-  const byFolder =
-    p.includes("/HP") ||
-    p.includes("HOME") ||
-    p.includes("HOME-BIZ");
-
-  const byName =
-    n.startsWith("NO ") ||
-    n.startsWith("HP") ||
-    /^\d+$/.test(n);
-
-  return byFolder || byName;
+/* ===================== DISTANCE ===================== */
+function distM(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = x => x * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat/2)**2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-/* ===================== DETECT FAT ===================== */
-function isFATPoint(pt) {
-  const p = (pt.path || "").toUpperCase();
-  const n = (pt.name || "").toUpperCase();
-
-  return (
-    p.includes("FAT") ||
-    n.includes("FAT")
-  );
-}
-
-/* ===================== EXTRACT ===================== */
-function extractHP(points) {
-  return points
-    .filter(pt => isHPPoint(pt))
-    .map(pt => ({
-      hpId: pt.name.trim(),
-      lat: pt.lat,
-      lon: pt.lon,
-      path: pt.path
-    }));
-}
-
-function extractFAT(points) {
-  return points
-    .filter(isFATPoint)
-    .map(pt => ({
-      fatId: pt.name,
-      lat: pt.lat,
-      lon: pt.lon
-    }));
-}
-
-/* ===================== NEAREST FAT ===================== */
-function nearestFAT(hp, fats) {
-  if (!fats.length) return { fatId: "", distM: "" };
-
-  let best = fats[0];
-  let bestD = distM(hp.lat, hp.lon, best.lat, best.lon);
-
-  for (let i = 1; i < fats.length; i++) {
-    const f = fats[i];
-    const d = distM(hp.lat, hp.lon, f.lat, f.lon);
-    if (d < bestD) {
-      bestD = d;
-      best = f;
-    }
-  }
-
-  return { fatId: best.fatId, distM: bestD };
-}
-
-/* ===================== TABLE ===================== */
+/* ===================== TABLE RENDER ===================== */
 function renderTableTakeout(rows) {
   const tbody = $("table").querySelector("tbody");
   tbody.innerHTML = "";
+
+  if (!rows.length) return;
 
   for (const r of rows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${r.hpId}</td>
-      <td>${r.lat.toFixed(7)}</td>
-      <td>${r.lon.toFixed(7)}</td>
-      <td>${r.nearestFat || "-"}</td>
-      <td>${r.distToFatM === "" ? "-" : r.distToFatM.toFixed(1)}</td>
+      <td>${Number(r.lat).toFixed(7)}</td>
+      <td>${Number(r.lon).toFixed(7)}</td>
       <td>${r.reason}</td>
     `;
     tbody.appendChild(tr);
@@ -179,21 +116,20 @@ function renderTableTakeout(rows) {
 
 /* ===================== CSV ===================== */
 function toCsv(rows) {
-  const header = ["HP_ID","Lat","Lon","Folder","NearestFAT","DistToFAT_m","Reason"];
+  const header = ["HP_ID","Lat","Lon","Folder","Reason"];
   const lines = [header.join(",")];
+
+  const esc = (v) => `"${String(v ?? "").replaceAll('"','""')}"`;
 
   for (const r of rows) {
     lines.push([
-      `"${r.hpId}"`,
+      esc(r.hpId),
       r.lat,
       r.lon,
-      `"${r.path}"`,
-      `"${r.nearestFat || ""}"`,
-      r.distToFatM === "" ? "" : r.distToFatM.toFixed(2),
-      `"${r.reason}"`
+      esc(r.path),
+      esc(r.reason)
     ].join(","));
   }
-
   return lines.join("\n");
 }
 
@@ -214,57 +150,56 @@ $("run").addEventListener("click", async () => {
     const design = $("design").files[0];
     const radius = Number($("radius").value || 0);
 
-    if (!survey || !design)
-      return alert("Upload KMZ Survey & KMZ Design");
+    if (!survey || !design) return alert("Upload KMZ Survey & KMZ Design");
 
     setStatus("Parsing KMZ...");
     $("download").disabled = true;
     lastTakeoutRows = [];
+    renderTableTakeout([]); // clear
 
     const [sKml, dKml] = await Promise.all([
       readKmzOrKml(survey),
       readKmzOrKml(design)
     ]);
 
-    const surveyPoints = parsePointsFromKML(sKml);
-    const designPoints = parsePointsFromKML(dKml);
-
-    const sHP = extractHP(surveyPoints);
-    const dHP = extractHP(designPoints);
-    const fats = extractFAT(designPoints);
+    const sHP = parseHPFromKML(sKml);
+    const dHP = parseHPFromKML(dKml);
 
     let matched = 0;
     const takeout = [];
 
+    // Kita match pakai ID dulu, kalau tidak ketemu baru pakai jarak
     for (const hp of sHP) {
+      let reason = "";
+
+      // match by ID
       let found = dHP.some(d => d.hpId === hp.hpId);
-
-      if (!found && radius > 0) {
-        found = dHP.some(d =>
-          distM(hp.lat, hp.lon, d.lat, d.lon) <= radius
-        );
-      }
-
       if (found) {
         matched++;
         continue;
       }
 
-      const nf = nearestFAT(hp, fats);
+      // fallback by distance
+      if (!found && radius > 0) {
+        found = dHP.some(d => distM(hp.lat, hp.lon, d.lat, d.lon) <= radius);
+        if (found) {
+          matched++;
+          continue;
+        }
+      }
 
-      takeout.push({
-        ...hp,
-        reason: "TAKEOUT",
-        nearestFat: nf.fatId,
-        distToFatM: nf.distM === "" ? "" : nf.distM
-      });
+      // takeout
+      reason = "TAKEOUT";
+      takeout.push({ ...hp, reason });
     }
 
-    lastTakeoutRows = takeout;
+    // tampilkan list takeout
     renderTableTakeout(takeout);
 
+    lastTakeoutRows = takeout;
+
     $("summary").textContent =
-      `Survey HP: ${sHP.length} | Design HP: ${dHP.length} | Matched: ${matched} | TAKEOUT: ${takeout.length} | FAT found: ${fats.length}`;
+      `Survey HP: ${sHP.length} | Design HP: ${dHP.length} | Matched: ${matched} | TAKEOUT: ${takeout.length}`;
 
     $("download").disabled = takeout.length === 0;
     setStatus("Selesai.");
@@ -276,5 +211,5 @@ $("run").addEventListener("click", async () => {
 });
 
 $("download").addEventListener("click", () => {
-  downloadCsv("hp_takeout_nearest_fat.csv", toCsv(lastTakeoutRows));
+  downloadCsv("hp_takeout.csv", toCsv(lastTakeoutRows));
 });
