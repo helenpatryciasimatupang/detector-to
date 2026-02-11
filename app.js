@@ -1,12 +1,11 @@
 /* =========================================================
    HP TAKEOUT DETECTOR
-   FINAL (FOLDER-AWARE + SHOW LIST + NEAREST FAT)
+   FINAL FIX (FOLDER + NAME DETECTION)
    ========================================================= */
 
 const $ = (id) => document.getElementById(id);
 let lastTakeoutRows = [];
 
-/* ===================== STATUS ===================== */
 function setStatus(msg) {
   $("status").textContent = msg;
 }
@@ -49,17 +48,20 @@ function distM(lat1, lon1, lat2, lon2) {
   const toRad = x => x * Math.PI / 180;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
+
   const a =
     Math.sin(dLat/2)**2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+    Math.cos(toRad(lat1)) *
+    Math.cos(toRad(lat2)) *
+    Math.sin(dLon/2)**2;
+
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-/* ===================== PARSE PLACEMARK POINTS ===================== */
+/* ===================== PARSE PLACEMARK ===================== */
 function parsePointsFromKML(kmlText) {
   const dom = new DOMParser().parseFromString(kmlText, "text/xml");
   const placemarks = [...dom.getElementsByTagName("Placemark")];
-
   const points = [];
 
   for (const pm of placemarks) {
@@ -86,55 +88,58 @@ function parsePointsFromKML(kmlText) {
   return points;
 }
 
-/* ===================== FILTER: HP (by folder path) ===================== */
-function isHPByFolder(path) {
-  const p = (path || "").toUpperCase();
-  return (
-    p.includes("/HP") || p.endsWith("HP") ||
-    p.includes("/HOME") ||
-    p.includes("/HOME-BIZ")
-  );
+/* ===================== DETECT HP ===================== */
+function isHPPoint(pt) {
+  const p = (pt.path || "").toUpperCase();
+  const n = (pt.name || "").toUpperCase();
+
+  const byFolder =
+    p.includes("/HP") ||
+    p.includes("HOME") ||
+    p.includes("HOME-BIZ");
+
+  const byName =
+    n.startsWith("NO ") ||
+    n.startsWith("HP") ||
+    /^\d+$/.test(n);
+
+  return byFolder || byName;
 }
 
-/* ===================== FILTER: FAT (by folder path OR name) ===================== */
+/* ===================== DETECT FAT ===================== */
 function isFATPoint(pt) {
   const p = (pt.path || "").toUpperCase();
   const n = (pt.name || "").toUpperCase();
 
-  // Folder contain FAT or name contain FAT
-  // (Tidak pakai "FAT " doang supaya ketemu FATxxx, FOT..., dsb yang masih ada FAT di label)
   return (
-    p.includes("/FAT") || p.endsWith("FAT") ||
+    p.includes("FAT") ||
     n.includes("FAT")
   );
 }
 
-/* ===================== BUILD HP LIST FROM POINTS ===================== */
+/* ===================== EXTRACT ===================== */
 function extractHP(points) {
   return points
-    .filter(pt => isHPByFolder(pt.path))
+    .filter(pt => isHPPoint(pt))
     .map(pt => ({
-      hpId: pt.name,
+      hpId: pt.name.trim(),
       lat: pt.lat,
       lon: pt.lon,
       path: pt.path
     }));
 }
 
-/* ===================== BUILD FAT LIST FROM POINTS ===================== */
 function extractFAT(points) {
-  // FAT biasanya ada di KMZ design. Kita ambil semua FAT point.
   return points
     .filter(isFATPoint)
     .map(pt => ({
       fatId: pt.name,
       lat: pt.lat,
-      lon: pt.lon,
-      path: pt.path
+      lon: pt.lon
     }));
 }
 
-/* ===================== FIND NEAREST FAT ===================== */
+/* ===================== NEAREST FAT ===================== */
 function nearestFAT(hp, fats) {
   if (!fats.length) return { fatId: "", distM: "" };
 
@@ -153,20 +158,19 @@ function nearestFAT(hp, fats) {
   return { fatId: best.fatId, distM: bestD };
 }
 
-/* ===================== TABLE RENDER ===================== */
+/* ===================== TABLE ===================== */
 function renderTableTakeout(rows) {
   const tbody = $("table").querySelector("tbody");
   tbody.innerHTML = "";
-  if (!rows.length) return;
 
   for (const r of rows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${r.hpId}</td>
-      <td>${Number(r.lat).toFixed(7)}</td>
-      <td>${Number(r.lon).toFixed(7)}</td>
+      <td>${r.lat.toFixed(7)}</td>
+      <td>${r.lon.toFixed(7)}</td>
       <td>${r.nearestFat || "-"}</td>
-      <td>${(r.distToFatM === "" ? "-" : Number(r.distToFatM).toFixed(1))}</td>
+      <td>${r.distToFatM === "" ? "-" : r.distToFatM.toFixed(1)}</td>
       <td>${r.reason}</td>
     `;
     tbody.appendChild(tr);
@@ -178,19 +182,18 @@ function toCsv(rows) {
   const header = ["HP_ID","Lat","Lon","Folder","NearestFAT","DistToFAT_m","Reason"];
   const lines = [header.join(",")];
 
-  const esc = (v) => `"${String(v ?? "").replaceAll('"','""')}"`;
-
   for (const r of rows) {
     lines.push([
-      esc(r.hpId),
+      `"${r.hpId}"`,
       r.lat,
       r.lon,
-      esc(r.path),
-      esc(r.nearestFat || ""),
-      r.distToFatM === "" ? "" : Number(r.distToFatM).toFixed(2),
-      esc(r.reason)
+      `"${r.path}"`,
+      `"${r.nearestFat || ""}"`,
+      r.distToFatM === "" ? "" : r.distToFatM.toFixed(2),
+      `"${r.reason}"`
     ].join(","));
   }
+
   return lines.join("\n");
 }
 
@@ -211,30 +214,25 @@ $("run").addEventListener("click", async () => {
     const design = $("design").files[0];
     const radius = Number($("radius").value || 0);
 
-    if (!survey || !design) return alert("Upload KMZ Survey & KMZ Design");
+    if (!survey || !design)
+      return alert("Upload KMZ Survey & KMZ Design");
 
     setStatus("Parsing KMZ...");
     $("download").disabled = true;
     lastTakeoutRows = [];
-    renderTableTakeout([]); // clear
 
     const [sKml, dKml] = await Promise.all([
       readKmzOrKml(survey),
       readKmzOrKml(design)
     ]);
 
-    // Parse ALL points first (so we can extract HP & FAT reliably)
     const surveyPoints = parsePointsFromKML(sKml);
     const designPoints = parsePointsFromKML(dKml);
 
-    // Extract HP from both
     const sHP = extractHP(surveyPoints);
     const dHP = extractHP(designPoints);
-
-    // Extract FAT from DESIGN
     const fats = extractFAT(designPoints);
 
-    // Match logic: by ID first, fallback by distance
     let matched = 0;
     const takeout = [];
 
@@ -242,7 +240,9 @@ $("run").addEventListener("click", async () => {
       let found = dHP.some(d => d.hpId === hp.hpId);
 
       if (!found && radius > 0) {
-        found = dHP.some(d => distM(hp.lat, hp.lon, d.lat, d.lon) <= radius);
+        found = dHP.some(d =>
+          distM(hp.lat, hp.lon, d.lat, d.lon) <= radius
+        );
       }
 
       if (found) {
@@ -250,7 +250,6 @@ $("run").addEventListener("click", async () => {
         continue;
       }
 
-      // TAKEOUT -> find nearest FAT
       const nf = nearestFAT(hp, fats);
 
       takeout.push({
